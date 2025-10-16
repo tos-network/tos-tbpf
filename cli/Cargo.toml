@@ -1,0 +1,14 @@
+[package]
+name = "tbpf_cli"
+version = "0.14.1"
+description = "CLI to test and analyze eBPF programs"
+authors = ["TOS Maintainers <info@tos.network>"]
+repository = "https://github.com/tos-network/tos-tbpf"
+homepage = "https://tos.network/"
+keywords = ["BPF", "eBPF", "interpreter", "JIT"]
+edition = "2018"
+
+[dependencies]
+tos-tbpf = { path = "../", features = ["debugger"] }
+test_utils = { path = "../test_utils/" }
+clap = "3.0.0-beta.2"

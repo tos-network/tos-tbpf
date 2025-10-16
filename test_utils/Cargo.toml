@@ -1,0 +1,10 @@
+[package]
+name = "test_utils"
+version = "0.14.0"
+authors = ["TOS Maintainers <info@tos.network>"]
+edition = "2018"
+publish = false
+
+[dependencies]
+libc = "0.2"
+tos-tbpf = { path = "../" }

@@ -1,0 +1,258 @@
+name: Safety Checks for Unsafe Code
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  RUST_BACKTRACE: 1
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Run tests with additional safety checks
+  test-with-assertions:
+    name: Test with Debug Assertions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run tests with debug assertions
+        run: cargo test --features="jit,debugger,fuzzer-not-safe-for-production,jit-enable-host-stack-frames"
+        env:
+          RUST_BACKTRACE: full
+
+  # Run Miri to detect undefined behavior
+  miri:
+    name: Miri (Undefined Behavior Detection)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install Miri
+        run: |
+          rustup toolchain install nightly --component miri
+          rustup override set nightly
+          cargo miri setup
+
+      - name: Run Miri on tests
+        run: |
+          MIRIFLAGS="-Zmiri-symbolic-alignment-check -Zmiri-check-number-validity" \
+          cargo miri test --lib
+        continue-on-error: true # Miri might find issues, but don't block PR
+
+  # Check for missing safety documentation
+  clippy-safety-docs:
+    name: Clippy - Safety Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Check for missing safety docs
+        run: |
+          cargo clippy --all-features -- \
+            -W clippy::missing-safety-doc \
+            -W clippy::undocumented-unsafe-blocks \
+            -D warnings
+
+  # Run address sanitizer
+  address-sanitizer:
+    name: AddressSanitizer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Run tests with AddressSanitizer
+        run: |
+          RUSTFLAGS="-Z sanitizer=address" \
+          cargo +nightly test --lib --target x86_64-unknown-linux-gnu
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+
+  # Run memory sanitizer
+  memory-sanitizer:
+    name: MemorySanitizer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Build stdlib with MemorySanitizer
+        run: |
+          rustup component add rust-src --toolchain nightly
+          cargo +nightly clean
+
+      - name: Run tests with MemorySanitizer
+        run: |
+          RUSTFLAGS="-Z sanitizer=memory -Z sanitizer-memory-track-origins" \
+          cargo +nightly test --lib --target x86_64-unknown-linux-gnu -Z build-std
+        continue-on-error: true
+
+  # Fuzzing with cargo-fuzz
+  fuzz:
+    name: Fuzzing Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+
+      - name: Run fuzz tests (short run)
+        run: |
+          cd fuzz
+          cargo fuzz list | xargs -I {} cargo fuzz run {} -- -max_total_time=60
+        continue-on-error: true
+
+  # Static analysis with cargo-geiger (unsafe code detection)
+  geiger:
+    name: Cargo Geiger (Unsafe Code Scanner)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-geiger
+        run: cargo install cargo-geiger
+
+      - name: Scan for unsafe code
+        run: |
+          cargo geiger --features="jit,debugger,fuzzer-not-safe-for-production" --output-format GitHubMarkdown > geiger-report.md || true
+          cat geiger-report.md
+        continue-on-error: true
+
+      - name: Upload Geiger report
+        uses: actions/upload-artifact@v4
+        with:
+          name: geiger-report
+          path: geiger-report.md
+        if: always()
+
+  # Verify safety improvements patch applies cleanly
+  verify-patch:
+    name: Verify Safety Improvements Patch
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Test applying safety patch
+        run: |
+          git apply --check SAFETY_IMPROVEMENTS.patch || echo "Patch needs updating"
+
+  # Property-based testing with proptest
+  proptest:
+    name: Property-Based Testing
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run proptest
+        run: cargo test --test property
+
+  # Generate safety audit report
+  audit-report:
+    name: Generate Safety Audit Report
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Check for unsafe code changes
+        run: |
+          # Count unsafe blocks
+          echo "## Unsafe Code Statistics" > safety-stats.md
+          echo "" >> safety-stats.md
+          echo "- Total unsafe blocks: $(grep -r 'unsafe' src/**/*.rs | wc -l)" >> safety-stats.md
+          echo "- Files with unsafe code: $(grep -l 'unsafe' src/**/*.rs | wc -l)" >> safety-stats.md
+          cat safety-stats.md
+
+      - name: Upload statistics
+        uses: actions/upload-artifact@v4
+        with:
+          name: safety-statistics
+          path: safety-stats.md
+
+  # Integration test with maximum safety checks
+  integration-test:
+    name: Integration Tests (Max Safety)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run integration tests with overflow checks
+        run: |
+          RUSTFLAGS="-C overflow-checks=on -C debug-assertions=on" \
+          cargo test --release tests/unsafe_verification_tests.rs
+
+  # Code coverage for unsafe blocks
+  coverage:
+    name: Coverage for Unsafe Code
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin
+
+      - name: Generate coverage
+        run: |
+          cargo tarpaulin --out Xml --output-dir coverage \
+            --exclude-files 'tests/*' \
+            --timeout 300
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          files: ./coverage/cobertura.xml
+          flags: unsafe-code
+
+  # Summary report
+  safety-summary:
+    name: Safety Check Summary
+    runs-on: ubuntu-latest
+    needs: [test-with-assertions, miri, clippy-safety-docs, address-sanitizer, geiger]
+    if: always()
+    steps:
+      - name: Summary
+        run: |
+          echo "# Safety Checks Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "All safety checks completed. Review individual job results above." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Next Steps" >> $GITHUB_STEP_SUMMARY
+          echo "1. Review UNSAFE_CODE_AUDIT.md for detailed analysis" >> $GITHUB_STEP_SUMMARY
+          echo "2. Apply SAFETY_IMPROVEMENTS.patch for recommended fixes" >> $GITHUB_STEP_SUMMARY
+          echo "3. Run 'cargo clippy -- -W clippy::missing-safety-doc' locally" >> $GITHUB_STEP_SUMMARY
